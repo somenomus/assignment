@@ -1,0 +1,265 @@
+'''
+Here, I will use an unsupervised learning algorithm, Autoencoder and apply anomaly detection technique to 
+identify possible fruad transactions using a Credit Card Fraud Detection 
+dataset(https://www.kaggle.com/hunk3749/credit-card/data).
+
+About this Dataset:
+The datasets contains transactions made by credit cards in September 2013 by european cardholders. 
+This dataset presents transactions that occurred in two days, where we have 492 frauds out of 284,807 
+transactions. The dataset is highly unbalanced, the positive class (frauds) account for 0.172% of all 
+transactions.
+
+Features V1, V2, ... V28 are the principal components obtained with PCA, the only features which have not
+been transformed with PCA are 'Time' and 'Amount'. And, another one 'Class'. Value 1>fraud, Value 0>normal.
+
+Problem Description:
+Here, I will use Autoencoder as an unsupervised feature-learning algorithn that learns and generalizes 
+the common patterns in the data. The key point is during the training, the Root Mean Square Error (RMSE)
+will be much higher for the transactions that have unusual patterns. For accuracy, will set a threshold.
+(Ex. 0.1)
+
+'''
+
+import tensorflow as tf
+import pandas as pd
+import numpy as np
+import os
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+from datetime import datetime
+
+from sklearn.metrics import roc_auc_score as auc
+import seaborn as sns                                    #for data visualization
+
+
+'''
+Now, I will load the data and print some features of it to know the dataset well.
+'''
+df = pd.read_csv('creditcard.csv')
+print(df.shape)                        #to see the hole dataset's shape
+print(df.head())                       #An overall look
+print(df.columns)                      #total 31
+print(df.dtypes)                       #type of elements
+
+'''
+Now, just for see, drawing the histogram for first two features.
+'''
+
+plt.figure(figsize=(8,5*4))
+gs = gridspec.GridSpec(5, 1)
+for i, cn in enumerate(df.columns[:2]):
+    ax = plt.subplot(gs[i])
+    sns.distplot(df[cn][df.Class == 1], bins=30)
+    sns.distplot(df[cn][df.Class == 0], bins=30)
+    ax.set_xlabel('')
+    ax.set_title('histogram of the feature: ' + str(cn))
+plt.show()
+
+'''
+Training, validation and testing set preparation:
+I will use first 80% of the data as training and validation set, and 20% for testing set.
+'''
+TEST_RATIO = 0.20
+df.sort_values('Time', inplace = True)
+TRA_INDEX = int((1-TEST_RATIO) * df.shape[0])
+train_x = df.iloc[:TRA_INDEX, 1:-2].values
+train_y = df.iloc[:TRA_INDEX, -1].values
+test_x = df.iloc[TRA_INDEX:, 1:-2].values
+test_y = df.iloc[TRA_INDEX:, -1].values
+
+#Now, display how much which data we got.
+print("Total train examples we got: {}, of which total fraud cases are: {}".format(train_x.shape[0], np.sum(train_y)))
+print("Total test examples we got: {}, of which total fraud cases are: {}".format(test_x.shape[0], np.sum(test_y)))
+
+'''
+Normalization:
+For better predictive accuracy, I will use tanh followed by z-score standardization.
+z-score: This normalizes each column towards a mean of zero and standardization of ones. 
+'''
+
+cols_mean = []
+cols_std = []
+for c in range(train_x.shape[1]):
+    cols_mean.append(train_x[:,c].mean())
+    cols_std.append(train_x[:,c].std())
+    train_x[:, c] = (train_x[:, c] - cols_mean[-1]) / cols_std[-1]
+    test_x[:, c] =  (test_x[:, c] - cols_mean[-1]) / cols_std[-1]
+ 
+#Now, will set the parameters of the network
+    
+learning_rate = 0.001
+training_epochs = 1000
+batch_size = 256
+display_step = 10
+
+n_hidden_1 = 15 # 1st layer num features
+n_input = train_x.shape[1] # input shape
+
+'''
+now, will build Encoder and Decoder. The 1st layer contains 15, 2nd layer contains 5 neurons. so, will
+build a network of architecture : 28(input) -> 15 -> 5 -> 15 -> 28(output).
+'''
+
+X = tf.placeholder("float", [None, n_input])         #placeholder for input
+
+#Weights and Biases of the network. random initialization
+weights = {
+    'encoder_h1': tf.Variable(tf.random_normal([n_input, n_hidden_1])),
+    'decoder_h1': tf.Variable(tf.random_normal([n_hidden_1, n_input])),
+	}
+
+biases = {
+    'encoder_b1': tf.Variable(tf.random_normal([n_hidden_1])),
+    'decoder_b1': tf.Variable(tf.random_normal([n_input])),
+	}
+
+'''
+Now, will build  a simple autoencoder. The encoder() function construct the encoder,which encode the hidden
+layer with tanh function. And the decoder() function, decode the hidden layer with tanh function as well.
+'''
+
+def encoder(x):
+    layer_1 = tf.nn.tanh(tf.add(tf.matmul(x, weights['encoder_h1']), biases['encoder_b1']))
+    return layer_1
+
+def decoder(x):
+    layer_1 = tf.nn.tanh(tf.add(tf.matmul(x, weights['decoder_h1']), biases['decoder_b1']))
+    return layer_1
+
+'''
+Then, construction of model by passing placeholder for the input data, weights and biases. Then, will make
+the prediction. and then evaluate the performance.
+'''
+encoder_op = encoder(X)
+decoder_op = decoder(encoder_op)
+
+y_pred = decoder_op
+y_true = X
+
+batch_mse= tf.reduce_mean(tf.pow(y_true - y_pred, 2), 1)
+
+'''
+now, will calculate Mean Squared Error(MSE). Will define the loss and optimizer and optimize the squared 
+error.
+'''
+cost_op = tf.reduce_mean(tf.pow(y_true - y_pred, 2))
+optimizer = tf.train.RMSPropOptimizer(learning_rate).minimize(cost_op)
+
+
+#define the path to save the model
+data_dir = 'log/'
+save_model = os.path.join(data_dir, 'autoencoder_model.ckpt')
+saver = tf.train.Saver()
+
+#initialize the variable
+init_op = tf.global_variables_initializer()
+
+'''
+Now, will start the training. will loop over all batches in the training cycle, then run the optimization 
+operation and cost operation to get the loss value. then display the logs per 10 epoch step , then save the
+model.
+'''
+
+epoch_list = []
+loss_list = []
+train_auc_list = []
+
+with tf.Session() as sess:
+    #now = datetime.now()
+    sess.run(init_op)
+    total_batch = int(train_x.shape[0]/batch_size)
+    # training cycle
+    for epoch in range(training_epochs):
+        for i in range(total_batch):
+            batch_idx = np.random.choice(train_x.shape[0], batch_size)
+            batch_xs = train_x[batch_idx]
+            # run the optimization op (backpropagation) and cost op (to get loss value)
+            _, c = sess.run([optimizer, cost_op], feed_dict={X: batch_xs})
+            
+        # Display logs per 10 epoch step
+        if epoch % display_step == 0:
+            train_batch_mse = sess.run(batch_mse, feed_dict={X: train_x})
+            epoch_list.append(epoch+1)
+            loss_list.append(c)
+            train_auc_list.append(auc(train_y, train_batch_mse))
+
+            print("Epoch:", '%04d,' % (epoch+1),
+                  "cost=", "{:.9f},".format(c), 
+                  "Train auc=", "{:.6f}".format(auc(train_y, train_batch_mse)))
+
+    print("optimization done")    
+    save_path = saver.save(sess, save_model)
+    		
+'''
+Now , will plot the results and information. Training acuracy, train loss, prediction vizualization,
+will show the both fraud and non fraud score closely.
+'''
+# first, ploting the training accuracy
+
+plt.plot(epoch_list, train_auc_list, 'k--', label='training accuracy', linewidth=1.0)
+plt.title('traing accuracy per iteration')
+plt.xlabel('Iteration')
+plt.ylabel('traing accuracy')
+plt.legend(loc='upper right')
+plt.grid(True)
+
+# then, plotting training loss over the time
+plt.plot(epoch_list, loss_list, 'r--', label='training loss', linewidth=1.0)
+plt.title('training loss')
+plt.xlabel('iteration')
+plt.ylabel('loss')
+plt.legend(loc='upper right')
+plt.grid(True)
+plt.show()
+
+#overall accuracy score on test data
+init = tf.global_variables_initializer()
+
+with tf.Session() as sess:
+    now = datetime.now()    
+    saver.restore(sess, save_model)    
+    test_batch_mse = sess.run(batch_mse, feed_dict={X: test_x})    
+    print("test accuracy score: {:.6f}".format(auc(test_y, test_batch_mse)))	
+
+# Visualize the prediction: Show distribution of all mse
+plt.hist(test_batch_mse[test_y == 0.0], bins = 100)
+plt.title("Fraud score (mse) distribution for non-fraud cases")
+plt.xlabel("Fraud score (mse)")
+plt.show()
+
+# Zoom into (0, 30) range, to see closely
+plt.hist(test_batch_mse[(test_y == 0.0) & (test_batch_mse < 30)], bins = 100)
+plt.title("Fraud score (mse) distribution for non-fraud cases")
+plt.xlabel("Fraud score (mse)")
+plt.show()	
+
+# Display only fraud classes
+plt.hist(test_batch_mse[test_y == 1.0], bins = 100)
+plt.title("Fraud score (mse) distribution for fraud cases")
+plt.xlabel("Fraud score (mse)")
+plt.show()
+
+'''
+using 10 as the detection threshold. then , print the overall obtained result. will compute number of 
+detected cases above threshold. then % of accuracy above the threshold.
+
+'''
+
+
+threshold = 10
+
+print("Number of detected cases above treshold: {}, \n\
+Number of pos cases only above threshold: {}, \n\
+The percentage of accuracy above treshold (Precision): {:0.2f}%. \n\
+Compared to the average percentage of fraud in test set: 0.132%".format( \
+np.sum(test_batch_mse > threshold), \
+np.sum(test_y[test_batch_mse > threshold]), \
+np.sum(test_y[test_batch_mse > threshold]) / np.sum(test_batch_mse > threshold) * 100))
+
+'''
+since unsupervised training used, model never sees the lebels during training, so no chance to overfitting.
+However deconvolutional autoencoder also can be used for this task.
+'''
+
+
+
